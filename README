@@ -139,8 +139,10 @@ Please take a look at the supplied "automysqlbackup.conf" for information about 
 Default configuration
 CONFIG_configfile="/etc/automysqlbackup/automysqlbackup.conf"
 CONFIG_backup_dir='/var/backup/db'
+CONFIG_do_daily="04"
 CONFIG_do_monthly="01"
 CONFIG_do_weekly="5"
+CONFIG_rotation_hourly=4320
 CONFIG_rotation_daily=6
 CONFIG_rotation_weekly=35
 CONFIG_rotation_monthly=150

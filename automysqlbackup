@@ -59,8 +59,10 @@ load_default_config() {
   CONFIG_backup_dir='/var/backup/db'
   CONFIG_multicore='yes'
   CONFIG_multicore_threads=2
+  CONFIG_do_daily="04"
   CONFIG_do_monthly="01"
   CONFIG_do_weekly="5"
+  CONFIG_rotation_hourly=4320
   CONFIG_rotation_daily=6
   CONFIG_rotation_weekly=35
   CONFIG_rotation_monthly=150
@@ -255,8 +257,9 @@ export -f remove_datetimeinfo
 # @args:	(none)
 # @deps:	days_of_month
 set_datetime_vars() {
-  datetimestamp=`date +%Y-%m-%d_%Hh%Mm`		# Datestamp e.g 2002-09-21_18h12m
-  date_stamp=`date +%Y-%m-%d`					# Datestamp e.g 2002-09-21
+  datetimestamp=`date +%F_%H-%M-%S`		# Datestamp e.g 2002-09-21_18-12-02
+  date_stamp=`date +%F`					# Datestamp e.g 2002-09-21
+  date_hour_of_day=`date +%H`               # Hour of the day 0 to 23
   date_day_of_week=`date +%A`					# Day of the week e.g. Monday
   date_dayno_of_week=`date +%u`				# Day number of the week 1 to 7 where 1 represents Monday
   date_day_of_month=`date +%e | sed -e 's/^ //'`				# Date of the Month e.g. 27
@@ -600,17 +603,18 @@ fullschema () {
 }
 
 # @info:	Process a single db.
-# @args:	subfolder, prefix, midfix, extension, rotation, rotation_divisor, rotation_string, 0/1 (db/dbs), db[, db ...]
+# @args:	subfolder, prefix, midfix, extension, rotation_by, rotation, rotation_divisor, rotation_string, 0/1 (db/dbs), db[, db ...]
 process_dbs() {
   local subfolder="$1"
   local prefix="$2"
   local midfix="$3"
   local extension="$4"
-  local rotation="$5"
-  local rotation_divisor="$6"
-  local rotation_string="$7"
-  local multipledbs="$8"
-  shift 8
+  local rotation_by="$5"
+  local rotation="$6"
+  local rotation_divisor="$7"
+  local rotation_string="$8"
+  local multipledbs="$9"
+  shift 9
 
   local name
   local subsubfolder
@@ -630,7 +634,7 @@ process_dbs() {
 
   [[ -d "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" ]] || {
   if (( $CONFIG_dryrun )); then
-      printf 'dry-running: mkdir -p %s/${subfolder}%s\n' "${CONFIG_backup_dir}" "${subsubfolder}"
+      printf 'dry-running: mkdir -p %s/%s%s\n' "${CONFIG_backup_dir}" "${subfolder}" "${subsubfolder}"
     else
       mkdir -p "${CONFIG_backup_dir}/${subfolder}${subsubfolder}"
     fi
@@ -682,7 +686,7 @@ process_dbs() {
 
 	  ## -> get latest master manifest entry for specified db
 	  # Create a differential backup if a master entry in the manifest exists, it isn't the day we do weekly master backups or the master file we fetched is already from today.
-	  if get_latest_manifest_entry_for_db "$db" 0 && ( (( ${date_dayno_of_week} != ${CONFIG_do_weekly} )) || [[ "${manifest_entry[0]}" = *_$(date +%Y-%m-%d)_* ]] ); then
+	  if get_latest_manifest_entry_for_db "$db" 0 && ( (( ${date_dayno_of_week} != ${CONFIG_do_weekly} )) || [[ "${manifest_entry[0]}" = *_$(date +%F)_* ]] ); then
 		pid="${manifest_entry[2]}"
 		# filename format: prefix_db_YYYY-MM-DD_HHhMMm_[A-Za-z0-9]{8}(.sql|.diff)(.gz|.bz2)(.enc)
 		FileStub="${manifest_entry[0]%.@(sql|diff)*}"
@@ -797,10 +801,18 @@ process_dbs() {
 
   if (( $ret == 0 )); then
 	  echo "Rotating $(( ${rotation}/${rotation_divisor} )) ${rotation_string} backups for ${name}"
-	  if (( $CONFIG_dryrun )); then
-	    find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mtime +"${rotation}" -type f -exec echo "dry-running: rm" {} \;
+	  if [[ "x$rotation_by" = "xday" ]]; then
+        if (( $CONFIG_dryrun )); then
+          find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mtime +"${rotation}" -type f -exec echo "dry-running: rm" {} \;
+        else
+          find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mtime +"${rotation}" -type f -exec rm {} \;
+        fi
 	  else
-	    find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mtime +"${rotation}" -type f -exec rm {} \;
+        if (( $CONFIG_dryrun )); then
+          find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mmin +"${rotation}" -type f -exec echo "dry-running: rm" {} \;
+        else
+          find "${CONFIG_backup_dir}/${subfolder}${subsubfolder}" -mmin +"${rotation}" -type f -exec rm {} \;
+        fi
 	  fi
 	  files_postprocessing "$cfname"
 	  tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
@@ -844,7 +856,7 @@ directory_checks_enable_logging () {
     ###################################################################################
     # Check directories and do cleanup work
 
-    checkdirs=( "${CONFIG_backup_dir}"/{daily,weekly,monthly,latest,tmp} )
+    checkdirs=( "${CONFIG_backup_dir}"/{hourly,daily,weekly,monthly,latest,tmp} )
     [[ "${CONFIG_backup_local_files[@]}" ]] && { checkdirs=( "${checkdirs[@]}" "${CONFIG_backup_dir}/backup_local_files" ); }
     [[ "${CONFIG_mysql_dump_full_schema}" = 'yes' ]] && { checkdirs=( "${checkdirs[@]}" "${CONFIG_backup_dir}/fullschema" ); }
 	[[ "${CONFIG_mysql_dump_dbstatus}" = 'yes' ]] && { checkdirs=( "${checkdirs[@]}" "${CONFIG_backup_dir}/status" ); }
@@ -1720,7 +1732,7 @@ method_backup () {
 	# <- preback commands
 
 	# -> backup local files
-	if [[ "${CONFIG_backup_local_files[@]}" ]] && [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/backup_local_files/bcf_weekly_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m_${date_weekno}.tar${suffix}"); ((! ${#f[@]}))); then
+	if [[ "${CONFIG_backup_local_files[@]}" ]] && [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/backup_local_files/bcf_weekly_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_weekno}.tar${suffix}"); ((! ${#f[@]}))); then
 		echo "======================================================================"
 		echo "Backup local files. Doing this weekly on CONFIG_do_weekly."
 		echo
@@ -1746,7 +1758,7 @@ method_backup () {
 		echo
 
 		# monthly
-		if (( ${CONFIG_do_monthly} != 0 && (${date_day_of_month} == ${CONFIG_do_monthly} || $date_day_of_month == $date_lastday_of_this_month && $date_lastday_of_this_month < ${CONFIG_do_monthly}) )) && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/fullschema/fullschema_monthly_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m_${date_month}.sql${suffix}"); ((! ${#f[@]}))); then
+		if (( ${CONFIG_do_monthly} != 0 && (${date_day_of_month} == ${CONFIG_do_monthly} || $date_day_of_month == $date_lastday_of_this_month && $date_lastday_of_this_month < ${CONFIG_do_monthly}) )) && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/fullschema/fullschema_monthly_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_month}.sql${suffix}"); ((! ${#f[@]}))); then
 		  fullschema "${CONFIG_backup_dir}/fullschema/fullschema_monthly_${datetimestamp}_${date_month}.sql"
 		  if (( $? == 0 )); then
 			echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
@@ -1764,7 +1776,7 @@ method_backup () {
 		fi
 
 		# weekly
-		if [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/fullschema/fullschema_weekly_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m_${date_weekno}.sql${suffix}"); ((! ${#f[@]}))); then
+		if [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/fullschema/fullschema_weekly_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_weekno}.sql${suffix}"); ((! ${#f[@]}))); then
 		  fullschema "${CONFIG_backup_dir}/fullschema/fullschema_weekly_${datetimestamp}_${date_weekno}.sql"
 		  if (( $? == 0 )); then
 			echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
@@ -1782,20 +1794,39 @@ method_backup () {
 		fi
 
 		# daily
-		fullschema "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql"
-		if (( $? == 0 )); then
-		  echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
-		  if (( $CONFIG_dryrun )); then
-			find "${CONFIG_backup_dir}/fullschema" -mtime +"${CONFIG_rotation_daily}" -type f -name 'fullschema_daily*' -exec echo "dry-running: rm" {} \;
-		  else
-			find "${CONFIG_backup_dir}/fullschema" -mtime +"${CONFIG_rotation_daily}" -type f -name 'fullschema_daily*' -exec rm {} \;
-		  fi
-		  files_postprocessing "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql${suffix}"
-		  tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
-		  backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql${suffix}${var}" )
-		else
-		  let "E |= $E_dump_fullschema_failed"
-		fi
+        if [[ ${CONFIG_do_daily} != -1 && ${date_hour_of_day} = ${CONFIG_do_daily} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/fullschema/fullschema_daily_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_day_of_week}.sql${suffix}"); ((! ${#f[@]}))); then
+          fullschema "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql"
+          if (( $? == 0 )); then
+            echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
+            if (( $CONFIG_dryrun )); then
+              find "${CONFIG_backup_dir}/fullschema" -mtime +"${CONFIG_rotation_daily}" -type f -name 'fullschema_daily*' -exec echo "dry-running: rm" {} \;
+            else
+              find "${CONFIG_backup_dir}/fullschema" -mtime +"${CONFIG_rotation_daily}" -type f -name 'fullschema_daily*' -exec rm {} \;
+            fi
+            files_postprocessing "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql${suffix}"
+            tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
+            backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/fullschema/fullschema_daily_${datetimestamp}_${date_day_of_week}.sql${suffix}${var}" )
+          else
+            let "E |= $E_dump_fullschema_failed"
+          fi
+        fi
+
+        # hourly
+        fullschema "${CONFIG_backup_dir}/fullschema/fullschema_hourly_${datetimestamp}.sql"
+        if (( $? == 0 )); then
+          echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
+          if (( $CONFIG_dryrun )); then
+            find "${CONFIG_backup_dir}/fullschema" -mmin +"${CONFIG_rotation_hourly}" -type f -name 'fullschema_hourly*' -exec echo "dry-running: rm" {} \;
+          else
+            find "${CONFIG_backup_dir}/fullschema" -mmin +"${CONFIG_rotation_hourly}" -type f -name 'fullschema_hourly*' -exec rm {} \;
+          fi
+          files_postprocessing "${CONFIG_backup_dir}/fullschema/fullschema_hourly_${datetimestamp}.sql${suffix}"
+          tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
+          backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/fullschema/fullschema_hourly_${datetimestamp}.sql${suffix}${var}" )
+        else
+          let "E |= $E_dump_fullschema_failed"
+        fi
+
 		echo
 		echo "======================================================================"
 		echo
@@ -1810,7 +1841,7 @@ method_backup () {
 		echo
 
 		# monthly
-		if (( ${CONFIG_do_monthly} != 0 && (${date_day_of_month} == ${CONFIG_do_monthly} || $date_day_of_month == $date_lastday_of_this_month && $date_lastday_of_this_month < ${CONFIG_do_monthly}) )) && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/status/status_monthly_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m_${date_month}.txt${suffix}"); ((! ${#f[@]}))); then
+		if (( ${CONFIG_do_monthly} != 0 && (${date_day_of_month} == ${CONFIG_do_monthly} || $date_day_of_month == $date_lastday_of_this_month && $date_lastday_of_this_month < ${CONFIG_do_monthly}) )) && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/status/status_monthly_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_month}.txt${suffix}"); ((! ${#f[@]}))); then
 		  dbstatus "${CONFIG_backup_dir}/status/status_monthly_${datetimestamp}_${date_month}.txt"
 		  if (( $? == 0 )); then
 			echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
@@ -1828,7 +1859,7 @@ method_backup () {
 		fi
 
 		# weekly
-		if [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/status/status_weekly_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m_${date_weekno}.txt${suffix}"); ((! ${#f[@]}))); then
+		if [[ ${CONFIG_do_weekly} != 0 && ${date_dayno_of_week} = ${CONFIG_do_weekly} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/status/status_weekly_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_weekno}.txt${suffix}"); ((! ${#f[@]}))); then
 		  dbstatus "${CONFIG_backup_dir}/status/status_weekly_${datetimestamp}_${date_weekno}.txt"
 		  if (( $? == 0 )); then
 			echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
@@ -1846,20 +1877,39 @@ method_backup () {
 		fi
 
 		# daily
-		dbstatus "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt"
-		if (( $? == 0 )); then
-		  echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
-		  if (( $CONFIG_dryrun )); then
-			find "${CONFIG_backup_dir}/status" -mtime +"${CONFIG_rotation_daily}" -type f -name 'status_daily*' -exec echo "dry-running: rm" {} \;
-		  else
-			find "${CONFIG_backup_dir}/status" -mtime +"${CONFIG_rotation_daily}" -type f -name 'status_daily*' -exec rm {} \;
-		  fi
-		  files_postprocessing "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt${suffix}"
-		  tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
-		  backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt${suffix}${var}" )
-		else
-		  let "E |= $E_dump_status_failed"
+		if [[ ${CONFIG_do_daily} != -1 && ${date_hour_of_day} = ${CONFIG_do_daily} ]] && (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/status/status_daily_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"_${date_day_of_week}.sql${suffix}"); ((! ${#f[@]}))); then
+          dbstatus "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt"
+          if (( $? == 0 )); then
+            echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
+            if (( $CONFIG_dryrun )); then
+              find "${CONFIG_backup_dir}/status" -mtime +"${CONFIG_rotation_daily}" -type f -name 'status_daily*' -exec echo "dry-running: rm" {} \;
+            else
+              find "${CONFIG_backup_dir}/status" -mtime +"${CONFIG_rotation_daily}" -type f -name 'status_daily*' -exec rm {} \;
+            fi
+            files_postprocessing "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt${suffix}"
+            tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
+            backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/status/status_daily_${datetimestamp}_${date_day_of_week}.txt${suffix}${var}" )
+          else
+            let "E |= $E_dump_status_failed"
+          fi
 		fi
+
+		# hourly
+        dbstatus "${CONFIG_backup_dir}/status/status_hourly_${datetimestamp}.sql"
+        if (( $? == 0 )); then
+          echo "Rotating $(( ${CONFIG_rotation_monthly}/31 )) month backups for ${mdb}"
+          if (( $CONFIG_dryrun )); then
+            find "${CONFIG_backup_dir}/status" -mmin +"${CONFIG_rotation_hourly}" -type f -name 'status_hourly*' -exec echo "dry-running: rm" {} \;
+          else
+            find "${CONFIG_backup_dir}/status" -mmin +"${CONFIG_rotation_hourly}" -type f -name 'status_hourly*' -exec rm {} \;
+          fi
+          files_postprocessing "${CONFIG_backup_dir}/status/status_hourly_${datetimestamp}.sql${suffix}"
+          tmp_flags=$?; var=; (( $tmp_flags & $flags_files_postprocessing_success_encrypt )) && var=.enc
+          backupfiles=( "${backupfiles[@]}" "${CONFIG_backup_dir}/status/status_hourly_${datetimestamp}.sql${suffix}${var}" )
+        else
+          let "E |= $E_dump_status_failed"
+        fi
+
 		echo
 		echo "======================================================================"
 		echo
@@ -1881,6 +1931,7 @@ method_backup () {
 		  prefix="monthly_"
 		  midfix="_${date_month}"
 		  extension=".sql"
+		  rotation_by="day"
 		  rotation="${CONFIG_rotation_monthly}"
 		  rotation_divisor="31"
 		  rotation_string="month"
@@ -1888,14 +1939,14 @@ method_backup () {
 		  if [[ "${CONFIG_mysql_dump_use_separate_dirs}" = "yes" ]]; then
 			for db in "${CONFIG_db_month_names[@]}"; do
 			  echo "Monthly Backup of Database ( ${db} )"
-			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${db}/${prefix}${db}_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m${midfix}${extension}${suffix}"); ((${#f[@]}))) && continue
-			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
+			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${db}/${prefix}${db}_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) && continue
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
 			  echo ----------------------------------------------------------------------
 			done
 		  else
 			  echo "Monthly backup of databases ( ${CONFIG_db_month_names[@]} )."
-			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${prefix}all-databases_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m${midfix}${extension}${suffix}"); ((${#f[@]}))) &&
-				process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_month_names[@]}"
+			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${prefix}all-databases_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) &&
+				process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_month_names[@]}"
 			  echo "----------------------------------------------------------------------"
 		  fi
 	  fi
@@ -1910,27 +1961,28 @@ method_backup () {
 		  prefix="weekly_"
 		  midfix="_${date_weekno}"
 		  extension=".sql"
+		  rotation_by="day"
 		  rotation="${CONFIG_rotation_weekly}"
 		  rotation_divisor="7"
 		  rotation_string="week"
 		  if [[ "${CONFIG_mysql_dump_use_separate_dirs}" = "yes" ]]; then
 			for db in "${CONFIG_db_names[@]}"; do
 			  echo "Weekly Backup of Database ( ${db} )"
-			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${db}/${prefix}${db}_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m${midfix}${extension}${suffix}"); ((${#f[@]}))) && continue
-			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
+			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${db}/${prefix}${db}_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) && continue
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
 			  echo "----------------------------------------------------------------------"
 			done
 		  else
 			echo "Weekly backup of databases ( ${CONFIG_db_names[@]} )."
-			(shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${prefix}all-databases_${date_stamp}_"[0-9][0-9]"h"[0-9][0-9]"m${midfix}${extension}${suffix}"); ((${#f[@]}))) &&
-			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_names[@]}"
+			(shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${prefix}all-databases_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) &&
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_names[@]}"
 			echo "----------------------------------------------------------------------"
 		  fi
 	  fi
 	  ## <- weekly backup
 
-	  ## -> daily backup, test (( 1 )) is always true, just creates a grouping for Kate, which can be closed ^^
-	  if (( 1 )); then
+	  ## -> daily backup, unique per day
+	  if (( ${CONFIG_do_daily} != -1 && ${date_hour_of_day} == ${CONFIG_do_daily} )); then
 		  echo "Daily Backup ..."
 		  echo
 
@@ -1938,6 +1990,7 @@ method_backup () {
 		  prefix="daily_"
 		  midfix="_${date_day_of_week}"
 		  extension=".sql"
+		  rotation_by="day"
 		  rotation="${CONFIG_rotation_daily}"
 		  rotation_divisor="1"
 		  rotation_string="day"
@@ -1945,16 +1998,46 @@ method_backup () {
 		  if [[ "${CONFIG_mysql_dump_use_separate_dirs}" = "yes" ]]; then
 			for db in "${CONFIG_db_names[@]}"; do
 			  echo "Daily Backup of Database ( ${db} )"
-			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
+			  (shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${db}/${prefix}${db}_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) && continue
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
 			  echo "----------------------------------------------------------------------"
 			done
 		  else
 			echo "Daily backup of databases ( ${CONFIG_db_names[@]} )."
-			process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_names[@]}"
+			(shopt -s nullglob dotglob; f=("${CONFIG_backup_dir}/${subfolder}/${prefix}all-databases_${date_stamp}_"[0-9][0-9]"-"[0-9][0-9]"-"[0-9][0-9]"${midfix}${extension}${suffix}"); ((${#f[@]}))) &&
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_names[@]}"
 			echo "----------------------------------------------------------------------"
 		  fi
 	  fi
 	  ## <- daily backup
+
+	  ## -> hourly backup, test (( 1 )) is always true, just creates a grouping for Kate, which can be closed ^^
+	  if (( 1 )); then
+		  echo "Hourly Backup ..."
+		  echo
+
+		  subfolder="hourly"
+		  prefix="hourly_"
+		  midfix=""
+		  extension=".sql"
+		  rotation_by="minute"
+		  rotation="${CONFIG_rotation_hourly}"
+		  rotation_divisor="23"
+		  rotation_string="hour"
+
+		  if [[ "${CONFIG_mysql_dump_use_separate_dirs}" = "yes" ]]; then
+			for db in "${CONFIG_db_names[@]}"; do
+			  echo "Hourly Backup of Database ( ${db} )"
+			  process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 0 "$db"
+			  echo "----------------------------------------------------------------------"
+			done
+		  else
+			echo "Hourly backup of databases ( ${CONFIG_db_names[@]} )."
+			process_dbs "$subfolder" "$prefix" "$midfix" "$extension" "$rotation_by" "$rotation" "$rotation_divisor" "$rotation_string" 1 "${CONFIG_db_names[@]}"
+			echo "----------------------------------------------------------------------"
+		  fi
+	  fi
+	  ## <- hourly backup
 
 	  echo
 	  echo "Backup End Time `date`"
@@ -2026,7 +2109,7 @@ method_list_manifest_entries () {
 	# BEGIN __MAIN
 	unset manifest_files manifest_files_db i db
 	while IFS= read -r -d '' file; do
-	  db="${file#/var/backup/db/@(daily|monthly|weekly|latest)/}";
+	  db="${file#/var/backup/db/@(hourly|daily|monthly|weekly|latest)/}";
 	  db="${db%/Manifest}";
 	  manifest_files_db[i]="$db"
 	  manifest_files[i++]="$file"
